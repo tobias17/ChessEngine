@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <sstream>
 #include <vector>
+#include <chrono>
 
 #include "engine.h"
 
@@ -15,6 +16,7 @@ bool CAN_HOP_ONTO[8][64];
 const int DIRECTIONS[8]     = {   7,   8,   9,  1, -7, -8, -9, -1 }; // @Restricion do not modify - must alternate horz/diag, starting with diag, v[i%8] = -v[(i+4)%8]
 const int KNIGHT_OFFSETS[8] = { -17, -15, -10, -6,  6, 10, 15, 17 };
 const uint8_t PROMOTIONS[4] = { Pieces::QUEEN, Pieces::ROOK, Pieces::BISHOP, Pieces::KNIGHT };
+const float LARGE_VALUE = 1000000;
 
 bool is_on_board(int x, int y, int dx, int dy) {
     return x + dx >= 0 && x + dx < 8 && y + dy >= 0 && y + dy < 8;
@@ -177,8 +179,8 @@ void apply_move(Board* board, Move* move) {
     board->fullmove_clock += (board->white_to_move);
 }
 
-Board* copy_board(Board* board) {
-    Board* new_board = new Board{
+Board copy_board(Board* board) {
+    Board new_board = Board {
         .white_to_move = board->white_to_move,
         .castling = board->castling,
         .en_passant = board->en_passant,
@@ -186,7 +188,7 @@ Board* copy_board(Board* board) {
         .fullmove_clock = board->fullmove_clock,
     };
     for (int i = 0; i < 64; i++) {
-        new_board->pieces[i] = board->pieces[i];
+        new_board.pieces[i] = board->pieces[i];
     }
     return new_board;
 }
@@ -538,6 +540,20 @@ string board_to_string(Board* board) {
     return ss.str();
 }
 
+string move_to_string(Move* move) {
+    stringstream ss;
+    ss << loc_to_string(move->start) << loc_to_string(move->end);
+    if (move->promotion) {
+        switch (move->promotion) {
+            case Pieces::QUEEN:  ss << "q"; break;
+            case Pieces::ROOK:   ss << "r"; break;
+            case Pieces::BISHOP: ss << "b"; break;
+            case Pieces::KNIGHT: ss << "n"; break;
+        }
+    }
+    return ss.str();
+}
+
 Board from_fen(string fen) {
     Board board;
 
@@ -713,4 +729,169 @@ string to_fen(Board* board) {
     ss << " " << (int)board->fullmove_clock;
 
     return ss.str();
+}
+
+namespace Evals {
+    float PAWN_VALUE = 1.0;
+    float KNIGHT_VALUE = 3.0;
+    float BISHOP_VALUE = 3.0;
+    float ROOK_VALUE = 5.0;
+    float QUEEN_VALUE = 9.0;
+}
+
+float quick_eval(Board* board) {
+    float eval = 0.0;
+    for (int start_loc = 0; start_loc < 64; start_loc++) {
+        uint8_t start_piece = board->pieces[start_loc];
+        if (start_piece) {
+            float color_sign = (board->pieces[start_loc] & Pieces::COLOR_MASK) == Pieces::WHITE ? 1.0 : -1.0;
+            switch (board->pieces[start_loc] & Pieces::TYPE_MASK) {
+                case Pieces::PAWN:   eval += Evals::PAWN_VALUE   * color_sign; break;
+                case Pieces::KNIGHT: eval += Evals::KNIGHT_VALUE * color_sign; break;
+                case Pieces::BISHOP: eval += Evals::BISHOP_VALUE * color_sign; break;
+                case Pieces::ROOK:   eval += Evals::ROOK_VALUE   * color_sign; break;
+                case Pieces::QUEEN:  eval += Evals::QUEEN_VALUE  * color_sign; break;
+            }
+        }
+    }
+    return eval;
+}
+
+struct Node {
+    float value;
+    int position;
+    Node* next_node = nullptr;
+};
+
+/*int* get_eval_order_ll(Board* new_boards, int count, float eval_sign) {
+    Node* root_node = nullptr;
+
+    for (int i = 0; i < count; i++) {
+        float eval = eval_sign * quick_eval(&new_boards[i]);
+        Node* new_node = new Node {
+            .value = eval,
+            .position = i,
+        };
+        if (root_node == nullptr || eval > root_node->value) {
+            new_node->next_node = root_node;
+            root_node = new_node;
+            continue;
+        }
+        Node* curr_node = root_node;
+        while (curr_node->next_node != nullptr) {
+            if (eval >= curr_node->next_node->value) {
+                new_node->next_node = curr_node->next_node;
+                curr_node->next_node = new_node;
+                break;
+            }
+            curr_node = curr_node->next_node;
+        }
+        if (new_node->next_node == nullptr) {
+            curr_node->next_node = new_node;
+        }
+    }
+
+    int* eval_order = new int[count];
+    Node* curr_node = root_node;
+    for (int i = 0; i < count; i++) {
+        eval_order[i] = curr_node->position;
+        Node* next_node = curr_node->next_node;
+        delete curr_node;
+        curr_node = next_node;
+    }
+
+    return eval_order;
+}*/
+
+int* get_eval_order(Board* new_boards, int count, float eval_sign) {
+    int* eval_order    = new int[count];
+    float* eval_values = new float[count];
+
+    for (int i = 0; i < count; i++) {
+        float eval = eval_sign * quick_eval(&new_boards[i]);
+
+        // bubble insert
+        int insert_loc;
+        for (insert_loc = 0; insert_loc < i; insert_loc++) {
+            if (eval > eval_values[insert_loc]) {
+                for (int swap_loc = i; swap_loc > insert_loc; swap_loc--) {
+                    eval_order[swap_loc]  = eval_order[swap_loc - 1];
+                    eval_values[swap_loc] = eval_values[swap_loc - 1];
+                }
+                break;
+            }
+        }
+        eval_order[insert_loc]  = i;
+        eval_values[insert_loc] = eval;
+    }
+
+    delete[] eval_values;
+    return eval_order;
+}
+
+float alpha_beta(Board* board, float alpha, float beta, int depth, int* visit_count) {
+    *visit_count += 1;
+    if (depth == 0) {
+        return quick_eval(board);
+    }
+
+    int count;
+    Move* moves = get_all_moves(board, &count);
+    float value = board->white_to_move ? -LARGE_VALUE : LARGE_VALUE;
+
+    Board* new_boards = new Board[count];
+    for (int i = 0; i < count; i++) {
+        new_boards[i] = copy_board(board);
+        apply_move(&new_boards[i], &moves[i]);
+    }
+
+    int* eval_order = get_eval_order(new_boards, count, board->white_to_move ? 1 : -1);
+
+    for (int i = 0; i < count; i++) {
+        float new_board_eval = alpha_beta(&new_boards[eval_order[i]], alpha, beta, depth - 1, visit_count);
+        if (board->white_to_move) {
+            value = max(value, new_board_eval);
+            if (value >= beta) break;
+            alpha = max(alpha, value);
+        } else {
+            value = min(value, new_board_eval);
+            if (value <= alpha) break;
+            beta = min(beta, value);
+        }
+    }
+
+    delete[] eval_order;
+    return value;
+}
+
+struct SearchData {
+    int time_ms;
+};
+
+Move get_best_move(Board* board, SearchData* search_data) {
+    int count;
+    Move* moves = get_all_moves(board, &count);
+    assert(count > 0);
+    int visit_count = 0;
+
+    float best_eval = board->white_to_move ? -LARGE_VALUE : LARGE_VALUE;
+    Move best_move;
+    auto begin = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < count; i++) {
+        Board new_board = copy_board(board);
+        apply_move(&new_board, &moves[i]);
+        float eval = alpha_beta(&new_board, -LARGE_VALUE, LARGE_VALUE, 5, &visit_count);
+        if ((board->white_to_move && eval > best_eval) || (!board->white_to_move && eval < best_eval)) {
+            best_move = moves[i];
+            best_eval = eval;
+        }
+    }
+
+    cout << move_to_string(&best_move) << endl;
+
+    auto end = std::chrono::high_resolution_clock::now();
+    cout << "Visited " << visit_count << " board positions in " << std::chrono::duration_cast<std::chrono::milliseconds>(end-begin).count() << " ms" << endl;
+
+    return best_move;
 }

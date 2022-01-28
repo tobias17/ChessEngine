@@ -16,6 +16,7 @@ def get_moves_cpp(board):
 
 def compare_moves(board):
     if not board.is_valid():
+        print('  skipping invalid board')
         return True
 
     moves_py = get_moves_py(board)
