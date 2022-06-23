@@ -13,10 +13,13 @@ using namespace std;
 uint8_t DIST_TO_EDGE[8][64];
 uint8_t DIST_IN_DIR[8][64][64]; // dir, source, dest
 bool CAN_HOP_ONTO[8][64];
+uint64_t TPOS_TABLE_VALUES[12][64];
+
 const int DIRECTIONS[8]     = {   7,   8,   9,  1, -7, -8, -9, -1 }; // @Restricion do not modify - must alternate horz/diag, starting with diag, v[i%8] = -v[(i+4)%8]
 const int KNIGHT_OFFSETS[8] = { -17, -15, -10, -6,  6, 10, 15, 17 };
 const uint8_t PROMOTIONS[4] = { Pieces::QUEEN, Pieces::ROOK, Pieces::BISHOP, Pieces::KNIGHT };
 const float LARGE_VALUE = 1000000;
+const int RAND_SEED = 0xCAFEBABE;
 
 bool is_on_board(int x, int y, int dx, int dy) {
     return x + dx >= 0 && x + dx < 8 && y + dy >= 0 && y + dy < 8;
@@ -28,7 +31,7 @@ int walk_to_edge(int x, int y, int dx, int dy, int count) {
 }
 
 // @Procedure - modifies global caches
-void gen_global_caches() {
+void create_global_caches() {
     // dist to edge
     for (int dir_i = 0; dir_i < 8; dir_i++) {
         int dx = DIRECTIONS[dir_i] % 8;
@@ -74,49 +77,20 @@ void gen_global_caches() {
             CAN_HOP_ONTO[7][y*8 + x] = is_on_board(x, y,  1,  2);
         }
     }
-}
 
-void delete_cache(PieceLocCache cache) {
-    delete cache.pieces;
-    delete cache.white;
-    delete cache.pieces;
-}
-
-PieceLocCache get_loc_cache(Board* board) {
-    PieceLocCache cache;
-    cache.piece_count = 0;
-    for (int i = 0; i < 64; i++) {
-        if (board->pieces[i]) {
-            cache.piece_count++;
-            if (board->pieces[i] & Pieces::WHITE) {
-                cache.white_count++;
-            } else {
-                assert(board->pieces[i] & Pieces::BLACK); // double check this is black
-                cache.black_count++;
-            }
+    // init transposition table with random values
+    std::srand(RAND_SEED);
+    for (int p = 0; p < 12; p++) {
+        for (int start_loc = 0; start_loc < 64; start_loc++) {
+            TPOS_TABLE_VALUES[p][start_loc] = (uint64_t) std::rand();
         }
     }
-    cache.pieces = new uint8_t[cache.piece_count];
-    int pieceIndex = 0;
-    int whiteIndex = 0;
-    int blackIndex = 0;
-    for (int i = 0; i < 64; i++) {
-        if (board->pieces[i]) {
-            cache.pieces[pieceIndex] = i;
-            pieceIndex++;
-            if (board->pieces[i] & Pieces::WHITE) {
-                cache.white[whiteIndex] = i;
-            } else {
-                assert(board->pieces[i] & Pieces::BLACK); // double check this is black
-                cache.white[blackIndex] = i;
-            }
-        }
-    }
-    // make sure we got all pieces
-    assert(pieceIndex == cache.piece_count);
-    assert(whiteIndex == cache.white_count);
-    assert(blackIndex == cache.black_count);
-    return cache;
+}
+
+uint64_t hash_piece(uint8_t piece, uint8_t loc) {
+    if (piece)
+        return TPOS_TABLE_VALUES[((piece & Pieces::BLACK) >> 5) * 6 + (piece & 0b111) - 1][loc];
+    return 0x00000000;
 }
 
 string loc_to_string(uint8_t loc) {
@@ -124,6 +98,12 @@ string loc_to_string(uint8_t loc) {
     s[0] = (loc % 8 + 'a');
     s[1] = (loc / 8 + '1');
     return s;
+}
+
+void update_pos_and_hash(Board* board, int loc, uint8_t value) {
+    board->hash ^= hash_piece(board->pieces[loc], loc);
+    board->pieces[loc] = value;
+    board->hash ^= value;
 }
 
 void apply_move(Board* board, Move* move) {
@@ -137,7 +117,7 @@ void apply_move(Board* board, Move* move) {
         board->halfmove_clock += 1;
     }
 
-    // castling
+    // castling flags
     if (move->start == StartLocs::WHITE_KING)
         board->castling &= (~Castling::WHITE_QUEENSIDE & ~Castling::WHITE_KINGSIDE);
     if (move->start == StartLocs::BLACK_KING)
@@ -155,24 +135,23 @@ void apply_move(Board* board, Move* move) {
     if ((board->pieces[move->start] & Pieces::TYPE_MASK) == Pieces::KING) {
         if (move->end - move->start == -2) {
             uint8_t rook_start = (board->white_to_move ? StartLocs::WHITE_QUEENSIDE_ROOK : StartLocs::BLACK_QUEENSIDE_ROOK);
-            board->pieces[move->start - 1] = board->pieces[rook_start];
-            board->pieces[rook_start] = 0x00;
+            update_pos_and_hash(board, move->start - 1, board->pieces[rook_start]);
+            update_pos_and_hash(board, rook_start,      0x00);
         } else if (move->end - move->start == 2) {
             uint8_t rook_start = (board->white_to_move ? StartLocs::WHITE_KINGSIDE_ROOK : StartLocs::BLACK_KINGSIDE_ROOK);
-            board->pieces[move->start + 1] = board->pieces[rook_start];
-            board->pieces[rook_start] = 0x00;
+            update_pos_and_hash(board, move->start + 1, board->pieces[rook_start]);
+            update_pos_and_hash(board, rook_start,      0x00);
         }
     }
     // en passant
     if (board->en_passant == move->end && (board->pieces[move->start] & Pieces::TYPE_MASK) == Pieces::PAWN) {
-        board->pieces[move->end + (board->white_to_move ? -8 : 8)] = 0x00;
+        update_pos_and_hash(board, move->end + (board->white_to_move ? -8 : 8), 0x00);
     }
-    board->pieces[move->end] = board->pieces[move->start];
-    board->pieces[move->start] = 0x00;
+    update_pos_and_hash(board, move->end,   board->pieces[move->start]);
+    update_pos_and_hash(board, move->start, 0x00);
     board->en_passant = move->en_passant;
     if (move->promotion) {
-        board->pieces[move->end] &= ~Pieces::TYPE_MASK;
-        board->pieces[move->end] |= move->promotion;
+        update_pos_and_hash(board, move->end, board->pieces[move->end] & ~Pieces::TYPE_MASK | move->promotion);
     }
 
     board->white_to_move = !board->white_to_move;
@@ -803,12 +782,37 @@ struct Node {
     return eval_order;
 }*/
 
-int* get_eval_order(Board* new_boards, int count, float eval_sign) {
-    int* eval_order    = new int[count];
+bool is_in_table(TableEntry** tpos_table, Board* board, int* depth_out, float* eval_out) {
+    TableEntry* curr_entry = tpos_table[board->hash & 0xffff];
+    while (curr_entry != nullptr) {
+        if (curr_entry->board.hash == board->hash) {
+            *depth_out = curr_entry->depth;
+            *eval_out = curr_entry->eval;
+            return true;
+        }
+        curr_entry = curr_entry->next_entry;
+    }
+    return false;
+}
+
+int* get_eval_order(Board* new_boards, int count, float eval_sign, int start_depth, bool* is_cached, float* cached_evals, TableEntry** tpos_table) {
+    int* eval_order    = new int  [count];
     float* eval_values = new float[count];
+    is_cached          = new bool [count];
+    cached_evals       = new float[count];
 
     for (int i = 0; i < count; i++) {
-        float eval = eval_sign * quick_eval(&new_boards[i]);
+        int depth = -1;
+        float eval;
+        is_cached[i] = false;
+        if (is_in_table(tpos_table, &new_boards[i], &depth, &eval)) {
+            if (depth == start_depth) {
+                cached_evals[i] = eval;
+                is_cached[i] = true;
+            }
+        } else{
+            eval = eval_sign * quick_eval(&new_boards[i]);
+        }
 
         // bubble insert
         int insert_loc;
@@ -829,13 +833,14 @@ int* get_eval_order(Board* new_boards, int count, float eval_sign) {
     return eval_order;
 }
 
-float alpha_beta(Board* board, float alpha, float beta, int depth, int* visit_count) {
+float alpha_beta(Board* board, float alpha, float beta, TableEntry** tpos_table, int depth, int start_depth, int* visit_count) {
     *visit_count += 1;
     if (depth == 0) {
         return quick_eval(board);
     }
 
     int count;
+    float eval_sign = board->white_to_move ? 1 : -1;
     Move* moves = get_all_moves(board, &count);
     float value = board->white_to_move ? -LARGE_VALUE : LARGE_VALUE;
 
@@ -845,10 +850,55 @@ float alpha_beta(Board* board, float alpha, float beta, int depth, int* visit_co
         apply_move(&new_boards[i], &moves[i]);
     }
 
-    int* eval_order = get_eval_order(new_boards, count, board->white_to_move ? 1 : -1);
+    // ordering of moves from best to worst based on prev evals and heuristics
+    int* eval_order;
+    bool* is_cached;
+    float* cached_evals;
+    [count, tpos_table, new_boards, start_depth, eval_sign, /* -> */ &eval_order, &is_cached, &cached_evals] {
+        eval_order         = new int  [count];
+        is_cached          = new bool [count];
+        cached_evals       = new float[count];
+        float* eval_values = new float[count];
 
-    for (int i = 0; i < count; i++) {
-        float new_board_eval = alpha_beta(&new_boards[eval_order[i]], alpha, beta, depth - 1, visit_count);
+        for (int i = 0; i < count; i++) {
+            int depth = -1;
+            float eval;
+            is_cached[i] = false;
+            if (is_in_table(tpos_table, &new_boards[i], &depth, &eval)) {
+                if (depth == start_depth) {
+                    cached_evals[i] = eval;
+                    is_cached[i] = true;
+                }
+            } else{
+                eval = eval_sign * quick_eval(&new_boards[i]);
+            }
+
+            // bubble insert
+            int insert_loc;
+            for (insert_loc = 0; insert_loc < i; insert_loc++) {
+                if (eval > eval_values[insert_loc]) {
+                    for (int swap_loc = i; swap_loc > insert_loc; swap_loc--) {
+                        eval_order[swap_loc]  = eval_order[swap_loc - 1];
+                        eval_values[swap_loc] = eval_values[swap_loc - 1];
+                    }
+                    break;
+                }
+            }
+            eval_order[insert_loc]  = i;
+            eval_values[insert_loc] = eval;
+        }
+
+        delete[] eval_values;
+    } ();
+
+    for (int raw_i = 0; raw_i < count; raw_i++) {
+        int i = eval_order[raw_i];
+        float new_board_eval;
+        if (is_cached[i]) {
+            new_board_eval = cached_evals[i];
+        } else {
+            new_board_eval = alpha_beta(&new_boards[i], alpha, beta, tpos_table, depth - 1, start_depth, visit_count);
+        }
         if (board->white_to_move) {
             value = max(value, new_board_eval);
             if (value >= beta) break;
@@ -861,6 +911,8 @@ float alpha_beta(Board* board, float alpha, float beta, int depth, int* visit_co
     }
 
     delete[] eval_order;
+    delete[] is_cached;
+    delete[] cached_evals;
     return value;
 }
 
@@ -868,30 +920,51 @@ struct SearchData {
     int time_ms;
 };
 
-Move get_best_move(Board* board, SearchData* search_data) {
+int elapsed_time_ms(chrono::_V2::steady_clock::time_point start) {
+    auto end = chrono::steady_clock::now();
+    return chrono::duration_cast<chrono::milliseconds>(end - start).count();
+}
+
+Move get_best_move(Board* board, SearchData* search_data, int* visit_count) {
+    auto start = chrono::steady_clock::now();
+
+    TableEntry* tpos_table[65536];
+    for (int i = 0; i < 65536; i++) tpos_table[i] = nullptr;
+
     int count;
     Move* moves = get_all_moves(board, &count);
     assert(count > 0);
-    int visit_count = 0;
 
     float best_eval = board->white_to_move ? -LARGE_VALUE : LARGE_VALUE;
-    Move best_move;
-    auto begin = std::chrono::high_resolution_clock::now();
+    Move best_move  = moves[0];
+    int time = elapsed_time_ms(start);
+    int max_depth;
+    for (max_depth = 1; max_depth < 99; max_depth++) {
+        float loop_best_eval = board->white_to_move ? -LARGE_VALUE : LARGE_VALUE;
+        Move loop_best_move  = moves[0];
 
-    for (int i = 0; i < count; i++) {
-        Board new_board = copy_board(board);
-        apply_move(&new_board, &moves[i]);
-        float eval = alpha_beta(&new_board, -LARGE_VALUE, LARGE_VALUE, 5, &visit_count);
-        if ((board->white_to_move && eval > best_eval) || (!board->white_to_move && eval < best_eval)) {
-            best_move = moves[i];
-            best_eval = eval;
+        for (int i = 0; i < count; i++) {
+            Board new_board = copy_board(board);
+            apply_move(&new_board, &moves[i]);
+            float eval = alpha_beta(&new_board, -LARGE_VALUE, LARGE_VALUE, tpos_table, max_depth, max_depth, visit_count);
+            if ((board->white_to_move && eval > best_eval) || (!board->white_to_move && eval < best_eval)) {
+                loop_best_move = moves[i];
+                loop_best_eval = eval;
+            }
+
+            time = elapsed_time_ms(start);
+            if (time >= search_data->time_ms) break;
         }
+        if (time >= search_data->time_ms) break;
+
+        best_move = loop_best_move;
+        best_eval = loop_best_eval;
     }
 
     cout << move_to_string(&best_move) << endl;
-
-    auto end = std::chrono::high_resolution_clock::now();
-    cout << "Visited " << visit_count << " board positions in " << std::chrono::duration_cast<std::chrono::milliseconds>(end-begin).count() << " ms" << endl;
+    cout << "Elapsed time: " << elapsed_time_ms(start) << endl;
+    cout << "Visit count:  " << *visit_count << endl;
+    cout << "Max depth:    " << max_depth << endl;
 
     return best_move;
 }

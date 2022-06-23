@@ -29,13 +29,14 @@ void print_moves(Board* board) {
 }
 
 int main() {
-    gen_global_caches();
+    create_global_caches();
 
     Board b = from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
     SearchData sd = SearchData {
-        .time_ms = 1000,
+        .time_ms = 10000,
     };
-    Move best_move = get_best_move(&b, &sd);
+    int count = 0;
+    Move best_move = get_best_move(&b, &sd, &count);
     // int visit_count;
     // alpha_beta(&b, -LARGE_VALUE, LARGE_VALUE, 1, &visit_count);
 

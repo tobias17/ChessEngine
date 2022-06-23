@@ -33,7 +33,6 @@ def compare_match(moves):
 if __name__ == "__main__":
     pgn = open("ficsgamesdb_search_241098.pgn")
     for i in range(100000):
-        if i < 280: continue
         game = chess.pgn.read_game(pgn)
         if not compare_match(game.mainline_moves()):
             break

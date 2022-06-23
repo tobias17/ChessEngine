@@ -49,15 +49,7 @@ struct Board {
     uint8_t en_passant;      // index on board "behind" the pawn, -1 means none
     uint8_t halfmove_clock;
     uint16_t fullmove_clock;
-};
-
-struct PieceLocCache {
-    uint8_t* pieces;
-    uint8_t* white;
-    uint8_t* black;
-    uint8_t piece_count;
-    uint8_t white_count;
-    uint8_t black_count;
+    uint64_t hash = 0;
 };
 
 struct Move {
@@ -65,6 +57,13 @@ struct Move {
     uint8_t end;
     uint8_t en_passant = 0xff; // index on board "behind" the pawn, "-1" means none
     uint8_t promotion  = 0x00; // piece type of promotion, 0 means none
+};
+
+struct TableEntry {
+    uint8_t depth;
+    float eval;
+    Board board; // full hash in here
+    TableEntry* next_entry = nullptr;
 };
 
 #endif // __ENGINE_H__

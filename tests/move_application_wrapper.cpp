@@ -5,9 +5,9 @@
 #define STARTING_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 int main(int argc, char** argv) {
-    gen_global_caches();
-    Board b = from_fen(STARTING_FEN);
+    create_global_caches();
 
+    Board b = from_fen(STARTING_FEN);
     for (int i = 1; i < argc; i++) {
         string value = argv[i];
         Move m {
@@ -28,6 +28,5 @@ int main(int argc, char** argv) {
     }
 
     cout << to_fen(&b) << endl;
-
     return 0;
 }

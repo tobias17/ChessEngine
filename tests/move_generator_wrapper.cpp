@@ -31,7 +31,8 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     string fen = argv[1];
 
-    gen_global_caches();
+    create_global_caches();
+
     Board b = from_fen(fen);
     print_moves(&b);
     return 0;
